@@ -83,9 +83,24 @@ jobs:
       # workflow neither copies those rules nor waits for them. A conflicting
       # one keeps auto-merge on, and GitHub re-evaluates it when Dependabot
       # rebases it.
-      - name: Put the pull request in the merge queue when it is ready
+      #
+      # With a merge queue the queue sets the merge method. Without one, `gh`
+      # needs a method when nobody is at the terminal, so it takes one the
+      # repository allows (squash, then rebase, then merge) and auto-merge
+      # merges the pull request directly once the branch's requirements hold:
+      # each repository is responsible for the checks it requires.
+      - name: Merge the pull request when it is ready
         if: ${{ steps.app.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.ref }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto "$PR_URL"
+        run: |
+          if gh api "repos/$GH_REPO/rules/branches/$BASE" --jq '.[].type' | grep -qx merge_queue; then
+            gh pr merge --auto "$PR_URL"
+          else
+            method=$(gh api "repos/$GH_REPO" --jq 'if .allow_squash_merge then "squash" elif .allow_rebase_merge then "rebase" else "merge" end')
+            echo "No merge queue on $BASE: auto-merge with --$method"
+            gh pr merge --auto "--$method" "$PR_URL"
+          fi
