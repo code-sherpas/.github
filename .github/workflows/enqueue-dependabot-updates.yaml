@@ -1,0 +1,91 @@
+name: Enqueue Dependabot minor and patch updates
+
+# Reusable: puts in the merge queue, with no person in between, every
+# Dependabot pull request whose highest bump is minor or patch. Majors, and any
+# bump Dependabot could not classify, stay manual, and so does a pull request a
+# person has pushed to (`github.actor`): whoever touched it enqueues it.
+#
+# ⚠️ A repository that calls this waives, for those pull requests, Gate 3 of
+# `pre-merge-gates` (the change exercised by hand before it is enqueued — the
+# standard names a dependency bump as a change that only LOOKS
+# regression-proof) and `post-deploy-verification`: its merge queue's build is
+# the only check those bumps get. Adopting it is that waiver, and whoever owns
+# the repository decides it. Each repository is responsible for its own checks;
+# this workflow does not look at them.
+#
+# It enqueues as the dependabot-enqueuer GitHub App, never with the
+# GITHUB_TOKEN: GitHub runs no workflow for an event the GITHUB_TOKEN caused,
+# and the merge queue's build is a workflow. Measured 2026-10-29 in
+# code-sherpas/claude-code-plugins#6: enqueued with the GITHUB_TOKEN, the entry
+# sat in AWAITING_CHECKS and no build started. The App's client ID and private
+# key are ORGANIZATION *Dependabot* secrets, because a run Dependabot triggered
+# sees no Actions secrets; the caller passes them with `secrets: inherit`.
+#
+# Usage, in .github/workflows/enqueue-dependabot-updates.yaml of the repository:
+#
+#   name: Enqueue Dependabot minor and patch updates
+#   on:
+#     pull_request:
+#       branches: [main]
+#       types: [opened, reopened, synchronize]
+#   permissions:
+#     contents: read
+#     pull-requests: read
+#   jobs:
+#     enqueue:
+#       uses: code-sherpas/.github/.github/workflows/enqueue-dependabot-updates.yaml@v1
+#       secrets: inherit
+
+on:
+  workflow_call:
+    secrets:
+      DEPENDABOT_ENQUEUER_CLIENT_ID:
+        required: true
+      DEPENDABOT_ENQUEUER_PRIVATE_KEY:
+        required: true
+
+# The workflow's own token only reads; the App's token is the one that writes.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  enqueue:
+    if: ${{ github.event_name == 'pull_request' && github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # One run per pull request: a Dependabot rebase replaces the run in progress.
+    concurrency:
+      group: enqueue-dependabot-updates-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Read what Dependabot bumped
+        id: metadata
+        uses: dependabot/fetch-metadata@v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # `update-type` is the HIGHEST bump in the pull request, so a group with a
+      # single major in it is left for a person. An empty value — a bump
+      # Dependabot could not classify — is left too.
+      - name: Get a token of the dependabot-enqueuer App
+        id: app
+        if: ${{ steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch' }}
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.DEPENDABOT_ENQUEUER_CLIENT_ID }}
+          private-key: ${{ secrets.DEPENDABOT_ENQUEUER_PRIVATE_KEY }}
+
+      # `--auto` leaves it to GitHub: the pull request enters the merge queue
+      # as soon as it meets everything the base branch requires — the required
+      # checks, no conflicts, resolved threads — and not before, so this
+      # workflow neither copies those rules nor waits for them. A conflicting
+      # one keeps auto-merge on, and GitHub re-evaluates it when Dependabot
+      # rebases it.
+      - name: Put the pull request in the merge queue when it is ready
+        if: ${{ steps.app.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto "$PR_URL"

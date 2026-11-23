@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # The actions the reusable workflows pin travel with every repository that
+  # calls them, so they are kept current here.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
